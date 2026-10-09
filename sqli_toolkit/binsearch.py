@@ -123,7 +123,8 @@ def extract_string(probe, string_expr: str, length: int,
                    substr: str = "SUBSTRING", ascii_fn: str = "ASCII",
                    debug: bool = False,
                    cfg: Optional[Any] = None,
-                   cache: Optional[ProbeCache] = None) -> str:
+                   cache: Optional[ProbeCache] = None,
+                   on_char=None) -> str:
     if length > MAX_STR_LEN:
         print(f"  !! requested length={length} exceeds cap "
               f"{MAX_STR_LEN}; clipping")
@@ -133,10 +134,20 @@ def extract_string(probe, string_expr: str, length: int,
         c = extract_char(probe, string_expr, i, substr, ascii_fn,
                          debug=debug, cfg=cfg, cache=cache)
         if c == "":
+            if on_char is not None:
+                try:
+                    on_char(i, length, "", "".join(out))
+                except Exception:
+                    pass
             break
         out.append(c)
         if debug:
             print(f"      [str] pos={i} char={c!r}")
+        if on_char is not None:
+            try:
+                on_char(i, length, c, "".join(out))
+            except Exception:
+                pass
     return "".join(out)
 
 

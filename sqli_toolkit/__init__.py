@@ -32,6 +32,8 @@ from .union_builder import (
     DIALECTS,
     CONCAT_LIMITS,
 )
+from .rich_ui import UI, has_rich
+from .json_out import JsonResult, write_tsv, write_jsonl
 from .channels import (
     Channel, ChannelInfo,
     ErrorChannel, BooleanChannel, TimeChannel,
@@ -50,6 +52,12 @@ from .pack_builder import (
 )
 
 __all__ = [
+    # UX / output
+    "UI",
+    "has_rich",
+    "JsonResult",
+    "write_tsv",
+    "write_jsonl",
     # channels
     "Channel",
     "ChannelInfo",

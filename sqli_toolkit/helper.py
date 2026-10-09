@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """Interactive walkthrough + auto mode for SQL injection practice.
 
 Auto mode:
@@ -327,6 +326,8 @@ def build_config_from_args(args) -> "Config":
         oob_domain=args.oob_domain,
         oob_wait=getattr(args, "oob_wait", None),
         channel=(getattr(args, "channel", None) or "auto"),
+        resume=bool(getattr(args, "resume", False)),
+        json_file=(str(args.json_file) if getattr(args, "json_file", None) else None),
     )
 
     # 3) merge settings.json into cfg, respecting explicit CLI
@@ -384,6 +385,10 @@ def main() -> None:
                     help="collaborator domain for OOB channel")
     ap.add_argument("--oob-wait", type=int, default=None,
                     help="seconds to wait for OOB callback (default: 30)")
+    ap.add_argument("--resume", action="store_true",
+                    help="resume from debug/state.json if present")
+    ap.add_argument("--json-file", default=None, metavar="PATH",
+                    help="write final result as JSON to PATH")
     ap.add_argument("--i-have-permission", action="store_true",
                     help="allow non-lab targets (implies written auth)")
     args = ap.parse_args()

@@ -1,6 +1,4 @@
 
-# scanner.py
-
 import time as _t
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +7,10 @@ from .http_client import Client, MARKER, status_of, body_of
 from .exceptions import (
     RateLimitHit, RetryExhausted, SessionExpired, WafBlocked,
 )
+try:
+    from .rich_ui import UI as _UI
+except Exception:
+    _UI = None
 
 # Debug hook — populated lazily so scanner works standalone too.
 try:
@@ -209,12 +211,22 @@ def discover_points(raw):
 
 
 def _replace_in_query(path, name, marker):
+    """Replace value of `name` in the query string.
+
+    The marker is URL-encoded, so payloads with spaces, quotes, `#`,
+    `(`, `)`, etc. do not break the HTTP request line. Only the marker
+    itself is encoded — the original query stays byte-for-byte.
+    """
+    from urllib.parse import quote as _q
     base, _, query = path.partition("?")
+    # Encode everything except url-safe default chars. We use safe=""
+    # so `?`, `&`, `=`, `+`, `/` inside the payload don't get through.
+    safe_marker = _q(marker, safe="")
     parts = _split_kv(query)
     new_parts = []
     for k, v in parts:
         if k == name:
-            new_parts.append(f"{k}={v}{marker}")
+            new_parts.append(f"{k}={v}{safe_marker}")
         else:
             new_parts.append(f"{k}={v}")
     return base + "?" + "&".join(new_parts)
@@ -321,36 +333,65 @@ def _baseline(client, raw, cache=None):
 def break_test(client, raw, point, cache=None):
     base_status, base_len = _baseline(client, raw, cache)
     patched = build_request_for_point(raw, point)
+    # Count how many probes actually made it to the wire. For URL points,
+    # a single bad char in the request line causes a transport error
+    # before the request is even sent, and that is NOT a SQLi signal.
+    sent = 0
+    signal = False
     for probe in ("'", "''"):
         try:
             r = _send_raw(client, patched.replace(MARKER, probe))
+            sent += 1
         except Exception:
             continue
         st = status_of(r)
         ln = len(body_of(r))
         if st != base_status:
-            return True
+            signal = True
+            break
         if abs(ln - base_len) > 40:
-            return True
-    return False
+            signal = True
+            break
+    if getattr(point, "kind", "") == "url" and sent < 1:
+        # nothing was even sent -> transport problem, not injection
+        return False
+    return signal
 
 
 def test_point_error(client, raw, point,
                      prefix="'", suffix="'--", error_codes=(500,)):
+    # URL-point payloads are fragile: a single space or quote in the
+    # request line turns the whole probe into a transport error, not
+    # a SQL error. Skip them here; they are handled by explicit
+    # --channel selection if the user really wants them.
+    if getattr(point, "kind", "") == "url":
+        return None
     patched = build_request_for_point(raw, point)
-    for dialect in EB.all_error_dialects():
+    # Priority: MySQL/PostgreSQL first — most common dialects.
+    _prio = ["mysql", "postgres", "mssql", "oracle", "sqlite"]
+    dialects = [d for d in _prio if d in EB.all_error_dialects()]
+    for dialect in dialects:
         for name, tpl in EB.templates_for(dialect):
             t_sql = EB.build_payload(tpl, "1=1", prefix=prefix,
                                      suffix=suffix)
             f_sql = EB.build_payload(tpl, "1=2", prefix=prefix,
                                      suffix=suffix)
+            # Double-check: 1=1 must error TWICE, 1=2 must NOT error TWICE.
+            # Otherwise it is a flaky 500 (WAF, transient, parse error)
+            # and we skip it.
             try:
-                r_t = _send_raw(client, patched.replace(MARKER, t_sql))
-                r_f = _send_raw(client, patched.replace(MARKER, f_sql))
+                codes = []
+                for _ in range(2):
+                    r_t = _send_raw(client, patched.replace(MARKER, t_sql))
+                    codes.append(status_of(r_t))
+                for _ in range(2):
+                    r_f = _send_raw(client, patched.replace(MARKER, f_sql))
+                    codes.append(status_of(r_f))
             except Exception:
                 continue
-            if status_of(r_t) in error_codes and \
-               status_of(r_f) not in error_codes:
+            t1, t2, f1, f2 = codes
+            if (t1 in error_codes and t2 in error_codes and
+                    f1 not in error_codes and f2 not in error_codes):
                 return Hit(point, "error", prefix, suffix, dialect,
                            name, tpl)
     return None
@@ -373,6 +414,12 @@ def _baseline_time(client, raw, samples=2):
 
 def test_point_time_all(client, raw, point, delay=5, verbose=True):
     # Try every dialect and every time template. Returns first Hit.
+    if getattr(point, "kind", "") == "url":
+        # See test_point_error: URL payloads are not safely testable
+        # without a per-target encoding strategy.
+        if verbose:
+            print("    [time] skipped: url point")
+        return None
     patched = build_request_for_point(raw, point)
     baseline = _baseline_time(client, raw, samples=2)
     if verbose:
@@ -390,7 +437,6 @@ def test_point_time_all(client, raw, point, delay=5, verbose=True):
                 if not tpl:
                     continue
 
-                # Build true and false payloads
                 t_body = tpl.format(c="1=1", d=delay)
                 f_body = tpl.format(c="1=2", d=delay)
                 t_sql = f"{prefix}{t_body}{suffix}"

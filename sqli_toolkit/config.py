@@ -69,6 +69,8 @@ class Config:
     debug: bool = False
     quiet: bool = False
     json_out: bool = False
+    json_file: Optional[str] = None
+    resume: bool = False
     results_dir: Optional[Path] = None
     debug_dir: Optional[Path] = None
 
