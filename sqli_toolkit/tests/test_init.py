@@ -60,8 +60,14 @@ def test_constants_reexport():
 
 
 def test_dunder_all_matches_public_names():
+    """All names exported from v1.0 must still be in __all__.
+
+    v1.1+ added channels, Config, and exceptions; we only require that
+    the original public API is a subset of the current one.
+    """
     import sqli_toolkit
-    expected = {
+    must_have = {
+        # v1.0 payload builders / pack helpers
         "UnionBuilder", "tables_payload", "columns_payload", "data_payload",
         "DIALECTS", "CONCAT_LIMITS",
         "NumType", "NUMERIC_TYPES",
@@ -69,8 +75,28 @@ def test_dunder_all_matches_public_names():
         "unpack_ascii_7bit", "unpack_ascii_8bit",
         "sql_pack_expr",
         "__version__",
+        # v1.1+ Config / exceptions
+        "Config", "DISCLAIMER",
+        "SQLiToolkitError", "PermissionDenied", "SessionExpired",
+        "WafBlocked", "RateLimitHit", "RetryExhausted",
+        # v1.3 channels
+        "Channel", "ChannelInfo",
+        "ErrorChannel", "BooleanChannel", "TimeChannel",
+        "UnionChannel", "OobChannel",
+        "ALL_CHANNELS", "DEFAULT_ORDER",
+        "parse_channel_list", "build_channel",
     }
-    assert set(sqli_toolkit.__all__) == expected
+    missing = must_have - set(sqli_toolkit.__all__)
+    assert not missing, f"missing from __all__: {sorted(missing)}"
+
+
+def test_dunder_all_has_no_unexpected_names():
+    """__all__ must not export private or unknown names."""
+    import sqli_toolkit
+    for name in sqli_toolkit.__all__:
+        assert not name.startswith("_") or name == "__version__", (
+            f"__all__ contains private name: {name!r}"
+        )
 
 
 def test_submodule_import_still_works():

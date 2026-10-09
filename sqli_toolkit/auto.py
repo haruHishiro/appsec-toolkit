@@ -25,6 +25,11 @@ from .exceptions import (
     RateLimitHit, RetryExhausted, SessionExpired, WafBlocked,
 )
 from . import error_based as EB
+from .channels import (
+    ALL_CHANNELS, DEFAULT_ORDER as _DEFAULT_CH_ORDER,
+    build_channel, parse_channel_list,
+)
+from .channels.base import Channel, ChannelInfo
 
 
 TABLES_MAX = 30
@@ -1085,6 +1090,43 @@ def _preflight_sanity(pr, cfg, samples=2):
     return True
 
 
+
+def _wrap_channel(cfg, client, pr):
+    """Wrap the detected Prober into a Channel object for the record.
+
+    Never raises: returns None on any error so run_auto can continue.
+    """
+    try:
+        from .channels import build_channel
+    except Exception as e:
+        print(f"  !! _wrap_channel: channels import failed: {e!r}")
+        return None
+    try:
+        technique = getattr(pr, "technique", "boolean")
+        if technique == "boolean":
+            ch = build_channel("boolean", cfg, client, prober=pr)
+            ch.configure(pr.dialect, pr.prefix, pr.suffix,
+                         getattr(pr, "marker", "") or "")
+            return ch
+        if technique == "time":
+            ch = build_channel("time", cfg, client, prober=pr)
+            ch.configure(pr.dialect, pr.prefix, pr.suffix,
+                         getattr(pr, "delay", 5) or 5)
+            return ch
+        if technique == "error":
+            ch = build_channel("error", cfg, client, prober=pr)
+            ch.configure(pr.dialect, pr.prefix, pr.suffix,
+                         "detected",
+                         getattr(pr, "error_template", "") or "")
+            return ch
+    except Exception as e:
+        import traceback
+        print(f"  !! _wrap_channel failed: {e!r}")
+        traceback.print_exc()
+        return None
+    return None
+
+
 def run_auto(cfg_or_dir, delay=5, dry_run=False,
              debug=False, fast=False, scan_all=False,
              non_interactive=False, parallel=None,
@@ -1367,6 +1409,16 @@ def run_auto(cfg_or_dir, delay=5, dry_run=False,
     if dry_run:
         print("\n  --dry-run: stopping before extraction.")
         return
+
+    # --- Волна 3: wrap the detected channel (best effort) ---
+    try:
+        _selected_channel = _wrap_channel(cfg, client, pr)
+        if _selected_channel is not None:
+            _ch_info = _selected_channel.info()
+            print(f"  channel: {_ch_info.name} "
+                  f"(dialect={_ch_info.dialect}, {_ch_info.notes})")
+    except NameError as _e:
+        print(f"  ! _wrap_channel unavailable: {_e!r} (continuing)")
 
     res = Results(cdir, pr.dialect, pr.technique,
                   client.req.host + client.req.path)

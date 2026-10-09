@@ -326,6 +326,7 @@ def build_config_from_args(args) -> "Config":
         json_out=args.json_out,
         oob_domain=args.oob_domain,
         oob_wait=getattr(args, "oob_wait", None),
+        channel=(getattr(args, "channel", None) or "auto"),
     )
 
     # 3) merge settings.json into cfg, respecting explicit CLI
@@ -358,6 +359,9 @@ def main() -> None:
     ap.add_argument("--auto-marker", dest="non_interactive",
                     action="store_true",
                     help="alias for --non-interactive")
+    ap.add_argument("--channel", default=None,
+                    help="comma-separated channel list: "
+                         "error,boolean,time,union,oob (default: auto)")
     ap.add_argument("--parallel", type=int, default=None,
                     help="number of parallel worker threads (1=off)")
     ap.add_argument("--rps", type=float, default=None,
