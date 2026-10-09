@@ -12,28 +12,11 @@ DIALECTS = {
     "sqlite":   {"concat": "op",   "sep_op": "||", "comment": "-- -"},
 }
 
-# Maximum argument count for CONCAT() per dialect.
-# Oracle CONCAT() accepts exactly two arguments.
 CONCAT_LIMITS = {"oracle": 2}
 
 
 @dataclass
 class UnionBuilder:
-    """Builds a UNION SELECT payload.
-
-    cols_total:  total column count (from ORDER BY / NULL probing)
-    string_cols: 1-based indexes of string columns
-    layout:      dict {col_index: [expr, expr, ...]} - what to place in each column
-    dialect:     mysql | postgres | mssql | oracle | sqlite
-    sep:         separator between concatenated parts
-    table:       FROM clause target (None to omit)
-    where:       optional WHERE clause
-    comment:     override comment token
-    force_func:  True - prefer CONCAT; False - prefer the || operator
-    null_safe:   wrap each part in null_fn(x, '')
-    null_fn:     IFNULL (MySQL) or COALESCE (others)
-    quiet:       suppress warnings
-    """
     cols_total: int
     string_cols: list
     layout: dict
@@ -64,7 +47,6 @@ class UnionBuilder:
         return f"{self.null_fn}({expr},'')"
 
     def _can_use_concat(self, n_args):
-        """Returns True if CONCAT() accepts n_args arguments in this dialect."""
         mx = CONCAT_LIMITS.get(self.dialect.lower())
         if mx is None:
             return True
@@ -84,7 +66,6 @@ class UnionBuilder:
         dialect = self.dialect.lower()
         natural_func = DIALECTS[dialect]["concat"] == "func"
 
-        # Decide which form to use.
         if self.force_func is True:
             use_func = True
         elif self.force_func is False:
@@ -92,7 +73,6 @@ class UnionBuilder:
         else:
             use_func = natural_func
 
-        # CONCAT is not available if the dialect caps its argument count.
         if use_func and not self._can_use_concat(len(interleaved)):
             self._warn(
                 f"{self.dialect}: CONCAT() accepts at most "
@@ -101,8 +81,6 @@ class UnionBuilder:
             )
             use_func = False
 
-        # Not all dialects support the || operator natively in older versions,
-        # but MySQL does support it via the sql_mode PIPES_AS_CONCAT. Warn.
         if not use_func and dialect == "mysql":
             self._warn(
                 "MySQL: the || operator is only concatenation when "

@@ -36,3 +36,27 @@ Thumbs.db
 *.log
 payloads.txt
 creds.txt
+
+# --- sqli_toolkit: lab data, debug artefacts, patcher backups ---
+
+# Campaign data (request.txt, match.txt, words.txt, settings.json,
+# results/, debug/) must never be committed: cookies expire, logs grow.
+sqli_toolkit/*/request.txt
+sqli_toolkit/*/match.txt
+sqli_toolkit/*/words.txt
+sqli_toolkit/*/settings.json
+sqli_toolkit/*/results/
+sqli_toolkit/*/debug/
+
+# Patcher backups
+*.bak*
+*.bakT
+*.bakV2
+*.bakFIX*
+*.bakSPEED
+*.bakDBG
+*.bakAUTO
+
+# Keep pytest cache out of git
+.pytest_cache/
+patcher*

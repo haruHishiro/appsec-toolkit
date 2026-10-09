@@ -18,6 +18,12 @@ Also exposed for convenience: NUMERIC_TYPES, DIALECTS, CONCAT_LIMITS.
 """
 
 from ._version import __version__
+from .config import Config, DISCLAIMER, DEFAULT_MAX_RPS
+from .exceptions import (
+    SQLiToolkitError, PermissionDenied, SessionExpired,
+    WafBlocked, RateLimitHit, RetryExhausted,
+    ChannelNotFound, ExtractionAborted,
+)
 from .union_builder import (
     UnionBuilder,
     tables_payload,
@@ -37,6 +43,18 @@ from .pack_builder import (
 )
 
 __all__ = [
+    # config / errors
+    "Config",
+    "DISCLAIMER",
+    "DEFAULT_MAX_RPS",
+    "SQLiToolkitError",
+    "PermissionDenied",
+    "SessionExpired",
+    "WafBlocked",
+    "RateLimitHit",
+    "RetryExhausted",
+    "ChannelNotFound",
+    "ExtractionAborted",
     # union_builder
     "UnionBuilder",
     "tables_payload",
